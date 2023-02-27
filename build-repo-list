@@ -1,0 +1,14 @@
+#!/bin/bash
+# this will build a list of all the repos for a github user
+
+USER=$1
+if [ -z "$USER" ]
+then
+      echo "Missing github username"  
+      exit -1 
+fi
+
+curl -s https://api.github.com/users/$USER/repos?per_page=200 | \
+    jq -r ".[].html_url" | \
+    dos2unix  |
+    xargs -n1 echo | tee repo-list 

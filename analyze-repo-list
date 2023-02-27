@@ -1,0 +1,11 @@
+#!/bin/bash
+ 
+if [ -f "repo-list" ]
+then
+      echo "Using repo-list"   
+else
+      echo "build repo-list first" 
+      exit  
+fi
+
+ cat repo-list | xargs -n1 /bin/bash will-it-run 

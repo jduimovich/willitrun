@@ -1,0 +1,151 @@
+# will it run ? 
+# Automatic test of a single repo.
+# Uses the recommendation of the CDQ devfile or the dockerfile it finds
+# If the repo has a CDQ dockerfile or devfile found, create an app and a component
+# Watch for pods and routes
+# Pods just to see if the app is building
+# A Route will appear if the app deploys
+
+# Usage 
+
+REPO=$1
+if [ -z "$REPO" ]
+then
+      echo "Usage $0 <repourl>"  
+      exit -1 
+fi
+ 
+#echo "WillItRun: $REPO" 
+
+CDQ_NAME=test-cdq
+CDQ_TMP=$(mktemp)  
+cat << EOF >$CDQ_TMP
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: ComponentDetectionQuery
+metadata:  
+  name: $CDQ_NAME 
+spec:
+  git:
+    context: ""
+    revision: ""
+    url: $REPO
+  secret: ""
+EOF
+
+kubectl delete ComponentDetectionQuery $CDQ_NAME 2>&1  > /dev/null 
+kubectl apply -f $CDQ_TMP  2>&1  > /dev/null
+rm $CDQ_TMP
+ 
+echo -n "Waiting for CDQ $CDQ_NAME to be ready."
+MAX_WAIT=30
+WAIT_COUNTER=1
+while :
+do
+    YAML=$(kubectl get ComponentDetectionQuery $CDQ_NAME -o yaml)
+    LEN=$(echo "$YAML" | yq '.status.conditions' | yq length) 
+    if [ $LEN != 0 ]
+    then 
+      let LEN--
+      STATUS=$(echo "$YAML" | yq ".status.conditions[$LEN].type")  
+      if [ "$STATUS" == "Completed" ]
+      then
+          echo . 
+          DEVFILE=$( echo "$YAML" |  grep devfileFound | xargs)
+          DEVFILE_URL=$( echo "$YAML" |  grep devfileUrl | xargs)
+          DOCKERFILE_URL=$( echo "$YAML" |  grep dockerfileUrl | xargs) 
+          if [ "$DEVFILE$DEVFILE_URL" != "" ]; then   
+            printf "CDQ: %s\n\t%s\n\t%s\n\t%s\n" $REPO "$DEVFILE" "$DEVFILE_URL"  
+            break
+          else
+              if [ "$DOCKERFILE_URL" != "" ]; then   
+                printf "CDQ: %s\n\t%s\n" $REPO "$DOCKERFILE_URL"
+              else 
+                printf "CDQ: %s: No devfile or dockerfile found, no build attempt\n" "$REPO" 
+                exit
+              fi 
+          fi   
+          break
+      fi 
+    fi 
+    let WAIT_COUNTER++
+    if [ "$WAIT_COUNTER" == "$MAX_WAIT" ]
+    then
+        echo "CDQ TIMEOUT - exiting"
+        exit
+    fi 
+    sleep 1
+done 
+
+APP_NAME=$(basename $REPO)
+
+rm -rf generated/$APP_NAME/
+mkdir -p generated/$APP_NAME/
+
+APP_TMP=generated/$APP_NAME/app.yaml
+cat << APP_EOF >$APP_TMP
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: Application
+metadata:
+  name: $APP_NAME
+spec:
+  description: "$APP_NAME - will-it-run"
+  displayName: " $APP_NAME"  
+APP_EOF
+
+echo "Creating app "
+cat $APP_TMP | kubectl apply -f -
+
+COMPONENT_NAME=$APP_NAME
+COMPONENT_TMP=generated/$APP_NAME/component.yaml
+cat << COMPONENT_EOF >$COMPONENT_TMP
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: Component
+metadata:
+  name: $COMPONENT_NAME
+spec:
+  componentName: $COMPONENT_NAME
+  application: $APP_NAME
+  containerImage: quay.io/$MY_QUAY_USER/$COMPONENT_NAME  
+  targetPort: 8080
+  replicas: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 512Mi
+  source:
+    git:
+      url:  $REPO
+      revision: main
+COMPONENT_EOF
+ 
+if [ "$DEVFILE_URL" != "" ]; then  
+  echo "Creating Component with devfile URL: $DEVFILE_URL"
+  echo "      DEVFILE_URL" >>$COMPONENT_TMP 
+else 
+  echo "      $DOCKERFILE_URL" >>$COMPONENT_TMP  
+fi  
+
+cat $COMPONENT_TMP | kubectl apply -f -
+
+while true 
+do
+  clear 
+  echo "Waiting for $APP_NAME Resources, showing pods and routes" 
+  echo "See generated/$APP_NAME for yaml applied to cluster."
+  echo Pods
+  kubectl get pods | grep $APP_NAME
+  echo
+  echo Routes
+  kubectl get routes $APP_NAME
+  ERR=$? 
+  if [[ $ERR == 0 ]]; then
+    echo "Route is ready, goto URL:"
+    echo 
+    echo  "http://$(kubectl get route $APP_NAME -ojsonpath={.spec.host})"
+    echo 
+    exit 
+  else
+    echo "Route not ready"
+  fi
+  sleep 10
+done 
